@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Redshift Explorer</title>
+  <style>
+    :root{
+      --bg:#0b0f14;           /* deep space */
+      --panel:#0f1622;
+      --ink:#e6f0ff;
+      --muted:#8aa0b6;
+      --accent-2:#223a63;     /* info button */
+      /* fixed control widths (phone-friendly) */
+      --zW:72px; --epochW:148px; --ageW:96px;
+    }
+    *{box-sizing:border-box}
+    html,body{height:auto; min-height:100%;}
+    body{
+      margin:0;
+      font-family:system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+      background:var(--bg);
+      color:var(--ink);
+      -webkit-font-smoothing:antialiased;
+      text-rendering:optimizeLegibility;
+    }
+
+    /* App uses a stable viewport height to avoid iOS URL-bar "push around" */
+    .app{
+      width:min(480px, 95vw);
+      margin:0 auto;
+      min-height:100svh;      /* stable viewport height on mobile */
+      display:flex;
+      flex-direction:column;
+      gap:.6rem;
+    }
+    @media (orientation:landscape){ .app{ width:min(520px, 95vw); } }
+
+    header{ display:flex; align-items:center; justify-content:center; position:relative; padding:.4rem .6rem 0; }
+    h1{ margin:.2rem 0 .4rem; font-weight:800; letter-spacing:.5px; text-align:center; font-size:clamp(1.2rem, 3vw, 2rem); }
+
+    /* Top controls */
+    .controls{ display:flex; gap:.5rem; justify-content:center; align-items:center; padding:0 .6rem; flex-wrap:nowrap; }
+    .pill-group{ display:flex; gap:0; }
+    .pill-group .pill{ border-radius:0; overflow:hidden; }
+    .pill-group .pill:first-child{ border-top-left-radius:1.4rem; border-bottom-left-radius:1.4rem; }
+    .pill-group .pill:last-child{ border-top-right-radius:1.4rem; border-bottom-right-radius:1.4rem; }
+    .pill-group .pill + .pill{ margin-left:-2px; }
+    .pill{ display:inline-flex; align-items:center; justify-content:center; border-radius:1.4rem; padding:.55rem .9rem; font-weight:800; border:2px solid transparent; white-space:nowrap; box-shadow:0 2px 14px rgba(0,0,0,.25); overflow:hidden; text-overflow:ellipsis; }
+    .pill.tappable{ cursor:pointer; border-color:#2a3a56; }
+    .pill.tappable:active{ transform:translateY(1px); filter:brightness(0.98); }
+    .zval{ background:#101827; border-color:#2a3a56; width:var(--zW); font-variant-numeric:tabular-nums; }
+    .epoch{ background:#182234; border-color:#304569; width:var(--epochW); }
+
+    .info-btn{ position:absolute; right:.6rem; top:.35rem; background:var(--accent-2); color:#e9f3ff; border:2px solid #3b5583; border-radius:14px; width:34px; height:34px; display:flex; align-items:center; justify-content:center; font-weight:900; }
+    .info-btn span{ font-size:18px; transform:translateY(-1px); }
+
+    /* Layout */
+    .wrap{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:.3rem; padding:.6rem; align-items:stretch;
+      flex:1;        /* take remaining height below header+controls */
+      min-height:0;  /* allow children to size properly inside flex */
+    }
+    .panel{ background:var(--panel); border-radius:18px; padding:.6rem; position:relative; box-shadow:0 6px 26px rgba(0,0,0,.35); display:flex; flex-direction:column; }
+    .title{ display:none; }
+    .canvas-wrap{
+      position:relative; width:100%;
+      flex:1;
+      min-height:240px;
+      touch-action:none; -ms-touch-action:none;
+      user-select:none; -webkit-user-select:none; -webkit-touch-callout:none;
+    }
+    canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; border-radius:12px; touch-action:none; }
+
+    /* Portrait keeps side-by-side panels */
+    @media (orientation:portrait){ .canvas-wrap{ min-height:240px; } }
+    @media (orientation:landscape){ .wrap{ grid-template-columns:1fr 1fr; grid-template-rows:auto; } .canvas-wrap{ min-height:240px; } }
+
+    /* Info popup only (no dock) */
+    dialog#info{ border:none; border-radius:16px; background:#0d1420; color:var(--ink); padding:0; width:min(92vw,420px); box-shadow:0 24px 80px rgba(0,0,0,.55); }
+    #info header{ justify-content:space-between; padding:.8rem 1rem .2rem; } /* keep info dialog */
+    /* explicit age pill width */
+    #ageVal{ width:var(--ageW); }
+    #info h2{ font-size:1.2rem; margin:0; }
+    #info button.close{ width:64px; height:36px; border-radius:12px; background:#1b2a45; color:#cfe1ff; border:2px solid #2d4878; font-weight:800; }
+    #info .grid{ display:grid; grid-template-columns:auto 1fr; gap:.2rem .8rem; padding: .8rem 1rem 1rem; }
+    #info .grid dt{ color:#a9bed6; font-weight:700; }
+    #info .grid dd{ margin:0; font-feature-settings:"tnum" 1, "lnum" 1; }
+    dialog#info::backdrop{ background: rgba(0,0,0,0.4); }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Redshift Explorer</h1>
+      <button class="info-btn" id="openInfo" aria-label="Info"><span>i</span></button>
+    </header>
+
+    <div class="controls">
+      <div class="pill-group" id="epochToggleGroup" aria-label="Cycle epochs">
+        <div id="zVal" class="pill zval tappable" title="z value" role="button" tabindex="0">0.00</div>
+        <div id="epoch" class="pill epoch tappable" title="Epoch" role="button" tabindex="0">Local Universe</div>
+        <div id="ageVal" class="pill zval tappable" title="Age @ z (years)" role="button" tabindex="0">—</div>
+      </div>
+    </div>
+
+    <div class="wrap">
+      <section class="panel" id="restPanel">
+        <div class="title">Rest frame (80–800 nm)</div>
+        <div class="canvas-wrap"><canvas id="restCanvas"></canvas></div>
+      </section>
+
+      <section class="panel" id="shiftPanel">
+        <div class="title">Observed at redshifted wavelengths</div>
+        <div class="canvas-wrap"><canvas id="shiftCanvas" title="Drag or wheel to change z"></canvas></div>
+      </section>
+    </div>
+  </div>
+
+  <dialog id="info">
+    <header style="display:flex; justify-content:space-between; align-items:center; padding:.8rem 1rem .2rem">
+      <h2 style="margin:0; font-size:1.1rem">Info</h2>
+      <button class="close" id="closeInfo">Close</button>
+    </header>
+    <dl class="grid" id="infoGrid"></dl>
+  </dialog>
+
+<script>
+/* ================== Data ================== */
+const LINES = [
+  {name:'H I Lyman-lim', nm:91.2, cat:'H'},
+  {name:'H I Lyman-β', nm:102.572, cat:'H'},
+  {name:'H I Lyman-α', nm:121.567, cat:'H'},
+  {name:'Si IV', nm:139.69, cat:'metal'},
+  {name:'C IV', nm:154.95, cat:'metal'},
+  {name:'Mg II', nm:279.55, cat:'metal'},
+  {name:'Mg II', nm:280.27, cat:'metal'},
+  {name:'[O II]', nm:372.7, cat:'metal'},
+  {name:'Ca II K', nm:393.37, cat:'metal'},
+  {name:'Ca II H', nm:396.85, cat:'metal'},
+  {name:'Hδ', nm:410.17, cat:'H'},
+  {name:'Hγ', nm:434.05, cat:'H'},
+  {name:'He II', nm:468.6, cat:'He'},
+  {name:'Hβ', nm:486.13, cat:'H'},
+  {name:'[O III]', nm:500.7, cat:'metal'},
+  {name:'Mg b1', nm:518.36, cat:'metal'},
+  {name:'Mg b2', nm:517.27, cat:'metal'},
+  {name:'Mg b3', nm:516.73, cat:'metal'},
+  {name:'He I', nm:587.6, cat:'He'},
+  {name:'Na I D2', nm:588.995, cat:'metal'},
+  {name:'Na I D1', nm:589.592, cat:'metal'},
+  {name:'Hα', nm:656.28, cat:'H'},
+  {name:'[N II]', nm:658.3, cat:'metal'},
+  {name:'[S II]', nm:671.6, cat:'metal'},
+  {name:'[S II]', nm:673.1, cat:'metal'},
+  {name:'K I', nm:769.90, cat:'metal'}
+];
+const BANDS = [
+  {name:'UV', minNm:80, maxNm:380, color:'rgba(138,43,226,0.18)'},
+  {name:'Visible', minNm:380, maxNm:700, color:'rgba(200,200,60,0.15)'},
+  {name:'NIR', minNm:700, maxNm:1400, color:'rgba(200,80,80,0.12)'},
+  {name:'MIR', minNm:1400, maxNm:25000, color:'rgba(200,60,60,0.10)'},
+  {name:'FIR', minNm:25000, maxNm:1000000, color:'rgba(180,50,50,0.08)'}
+];
+const EPOCHS = [
+  {minZ:1100, label:'Opaque plasma', cls:'opaque'},
+  {minZ:30,   label:'Dark ages', cls:'dark'},
+  {minZ:15,   label:'Cosmic dawn', cls:'dark'},
+  {minZ:6,    label:'Reionization', cls:''},
+  {minZ:3,    label:'Early Galaxies', cls:''},
+  {minZ:1,    label:'Cosmic Noon', cls:''},
+  {minZ:.2,   label:'Recent Universe', cls:''},
+  {minZ:0,    label:'Local Universe', cls:''}
+];
+// Ascending order for nicer cycling: Local -> ... -> Opaque plasma
+const E_ORDER = [...EPOCHS].sort((a,b)=>a.minZ-b.minZ);
+
+/* ============ Cosmology (flat ΛCDM) ============ */
+const H0=67.4, OM=0.315, OL=1-OM, OR=5e-5; // H0 km/s/Mpc
+const C=299792.458, MPC_TO_LY=3.26156e6, SEC_PER_YEAR=31557600, METER_PER_MPC=3.0856775814913673e22;
+const Ez=z=>Math.sqrt(OR*Math.pow(1+z,4)+OM*Math.pow(1+z,3)+OL);
+function simpson(f,a,b,n){ if(n%2) n++; const h=(b-a)/n; let s=f(a)+f(b); for(let i=1;i<n;i++) s+=(i%2?4:2)*f(a+i*h); return s*h/3; }
+function comovingDistanceMpc(z){
+  if(z<=0) return 0;
+  const N_MAX = 4000;
+  const steps = Math.min(N_MAX, Math.max(600, Math.floor(140*z)));
+  const I=simpson(zp=>1/Ez(zp),0,z,steps);
+  return (C/H0)*I;
+}
+function lookbackTimeYears(z){
+  if(z<=0) return 0;
+  const H0s=(H0*1000)/METER_PER_MPC;
+  const N_MAX = 4000;
+  const steps = Math.min(N_MAX, Math.max(600, Math.floor(140*z)));
+  const I=simpson(zp=>1/((1+zp)*Ez(zp)),0,z,steps);
+  return (I/H0s)/SEC_PER_YEAR;
+}
+function ageAtZYears(z){
+  // t(z) = ∫_z^∞ dz' / ((1+z') H0 E(z'))
+  // Integrate in u = ln(1+z) for better accuracy near z≈0; add a radiation-era tail.
+  const H0s=(H0*1000)/METER_PER_MPC; // 1/s
+  const zCut = Math.max(5000, z);
+  const u0 = Math.log(1+z);
+  const u1 = Math.log(1+zCut);
+  const steps = 2400; // even; dense in u-space for low-z accuracy
+  const Iu = simpson(u => 1/Ez(Math.exp(u)-1), u0, u1, steps);
+  // tail in u-space: ∫_{u1}^{∞} du / (√Ω_r e^{2u}) = e^{-2u1}/(2√Ω_r)
+  const tail = Math.exp(-2*u1) / (2*Math.sqrt(OR));
+  return (Iu + tail) / H0s / SEC_PER_YEAR;
+}
+
+/* ================== Helpers ================== */
+const ALLOW_LANDSCAPE = false;
+const isLandscape = ()=> ALLOW_LANDSCAPE && window.matchMedia('(orientation:landscape)').matches;
+const fmtNm = nm => nm>=1000? (nm/1000).toFixed(2)+' µm' : nm.toFixed(1)+' nm';
+function formatLy(ly){ const a=Math.abs(ly); if(a>=1e9) return (ly/1e9).toFixed(2)+" Gly"; if(a>=1e6) return (ly/1e6).toFixed(2)+" Mly"; if(a>=1e3) return (ly/1e3).toFixed(2)+" kly"; return Math.round(ly).toLocaleString()+" ly"; }
+function formatYears(y){ if(Math.abs(y)>=1e9) return (y/1e9).toFixed(3)+" Gyr"; if(Math.abs(y)>=1e6) return (y/1e6).toFixed(3)+" Myr"; if(Math.abs(y)>=1e3) return (y/1e3).toFixed(3)+" kyr"; return Math.round(y).toLocaleString()+" yr"; }
+
+function makeTicks(minNm, maxNm){
+  const ticks=[]; const bases=[1,2,3,5];
+  const minV=Math.max(1, minNm), maxV=Math.max(minV, maxNm);
+  const e0=Math.floor(Math.log10(minV));
+  const e1=Math.ceil(Math.log10(maxV));
+  for(let e=e0; e<=e1; e++){
+    const scale=Math.pow(10,e);
+    for(const b of bases){ const v=b*scale; if(v>=minNm-1e-6 && v<=maxNm+1e-6) ticks.push(v); }
+  }
+  if(minNm<=80 && maxNm>=80 && !ticks.includes(80)) ticks.unshift(80);
+  if(minNm<=800 && maxNm>=800 && !ticks.includes(800)) ticks.push(800);
+  return ticks.sort((a,b)=>a-b);
+}
+function labelText(v){
+  if(v>=1000){ const um=v/1000; const d=um<10?2:um<100?1:0; return um.toFixed(d)+' µm'; }
+  return Math.round(v)+' nm';
+}
+function chooseEpoch(z){
+  const age = ageAtZYears(z);
+  if(age <= 0) return {label:'🐉 Monsters', cls:'monsters'};
+  for(const e of EPOCHS){ if(z>=e.minZ) return e; }
+  return EPOCHS[EPOCHS.length-1];
+}
+
+function DPR(){ return Math.min(3, window.devicePixelRatio||1); }
+function sizeCanvas(canvas){ const dpr=DPR(); const w=canvas.clientWidth, h=canvas.clientHeight; if(!w||!h) return; if(canvas.width!==Math.floor(w*dpr)||canvas.height!==Math.floor(h*dpr)){ canvas.width=Math.floor(w*dpr); canvas.height=Math.floor(h*dpr); const ctx=canvas.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0);} }
+
+function innerRect(canvas, opts={}){
+  const { rightLabels=false } = opts;
+  // Tighter margins so labels sit closer to the canvas edge and the usable spectrum area is wider.
+  if(isLandscape()){
+    return {x:12, y:12, w:canvas.clientWidth-24, h:canvas.clientHeight-46, axisSide:'bottom'};
+  }
+  const labelMargin = 44;     // was 64px — reduced
+  const nonLabelMargin = 8;   // was 12px — reduced slightly
+  const leftMargin  = rightLabels ? nonLabelMargin : labelMargin;
+  const rightMargin = rightLabels ? labelMargin    : nonLabelMargin;
+  return {x:leftMargin, y:12, w:canvas.clientWidth-leftMargin-rightMargin, h:canvas.clientHeight-24, axisSide: rightLabels? 'right':'left'};
+}
+
+/* ===== Spectrum coloring and background ===== */
+function wlToRGB(wl){ let r=0,g=0,b=0; if(wl>=380&&wl<440){ r=-(wl-440)/(440-380); b=1; }
+  else if(wl<490){ g=(wl-440)/(490-440); b=1; }
+  else if(wl<510){ g=1; b=-(wl-510)/(510-490); }
+  else if(wl<580){ r=(wl-510)/(580-510); g=1; }
+  else if(wl<645){ r=1; g=-(wl-645)/(645-580); }
+  else if(wl<=700){ r=1; } else { r=0.6; g=0.05; b=0.05; }
+  let s=1; if(wl<420) s=0.5+0.5*(wl-380)/40; if(wl>645) s=0.5+0.5*(700-wl)/55;
+  r=Math.pow(Math.max(0,Math.min(1,r))*s,0.9); g=Math.pow(Math.max(0,Math.min(1,g))*s,0.9); b=Math.pow(Math.max(0,Math.min(1,b))*s,0.9);
+  return `rgb(${Math.round(r*255)},${Math.round(g*255)},${Math.round(b*255)})`; }
+
+function drawBackground(ctx, orientation, rect, minNm, maxNm){
+  const grad = orientation==='vertical' ? ctx.createLinearGradient(0,rect.y,0,rect.y+rect.h)
+                                        : ctx.createLinearGradient(rect.x,0,rect.x+rect.w,0);
+  grad.addColorStop(0,'rgba(84,36,120,0.9)');
+  grad.addColorStop(Math.max(0,(380-minNm)/(maxNm-minNm)),'rgba(84,36,120,0.9)');
+  for(const s of [380,440,490,510,580,645,700]){ if(s<minNm||s>maxNm) continue; const t=(s-minNm)/(maxNm-minNm); grad.addColorStop(t, wlToRGB(s)); }
+  grad.addColorStop(Math.max(0,(700-minNm)/(maxNm-minNm)),'rgb(120,20,20)');
+  grad.addColorStop(1,'rgb(70,14,14)');
+  ctx.fillStyle=grad; ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+
+  ctx.save(); ctx.globalCompositeOperation='overlay';
+  const BANDS = [
+    {name:'UV', minNm:80, maxNm:380, color:'rgba(138,43,226,0.18)'},
+    {name:'Visible', minNm:380, maxNm:700, color:'rgba(200,200,60,0.15)'},
+    {name:'NIR', minNm:700, maxNm:1400, color:'rgba(200,80,80,0.12)'},
+    {name:'MIR', minNm:1400, maxNm:25000, color:'rgba(200,60,60,0.10)'},
+    {name:'FIR', minNm:25000, maxNm:1000000, color:'rgba(180,50,50,0.08)'}
+  ];
+  for(const b of BANDS){ const a=Math.max(minNm,b.minNm), z=Math.min(maxNm,b.maxNm); if(z<=a) continue; if(orientation==='vertical'){ const y0=rect.y + rect.h*((a-minNm)/(maxNm-minNm)); const y1=rect.y + rect.h*((z-minNm)/(maxNm-minNm)); ctx.fillStyle=b.color; ctx.fillRect(rect.x,y0,rect.w,y1-y0);} else { const x0=rect.x + rect.w*((a-minNm)/(maxNm-minNm)); const x1=rect.x + rect.w*((z-minNm)/(maxNm-minNm)); ctx.fillStyle=b.color; ctx.fillRect(x0,rect.y,x1-x0,rect.h);} }
+  ctx.restore();
+}
+
+/* ===== JWST rail ===== */
+function drawJWST(ctx, orientation, rect, minNm, maxNm){
+  const jwMin=600, jwMax=28000; // nm
+  ctx.save();
+  ctx.globalAlpha = 0.85;
+  if(isLandscape()){
+    const y = rect.y + rect.h + 16;
+    const x0 = rect.x + rect.w*((Math.max(minNm,jwMin)-minNm)/(maxNm-minNm));
+    const x1 = rect.x + rect.w*((Math.min(maxNm,jwMax)-minNm)/(maxNm-minNm));
+    const w = Math.max(0,x1-x0);
+    if(w>0){
+      ctx.fillStyle = '#1b2330'; ctx.fillRect(x0, y, w, 12);
+      ctx.fillStyle = '#3b63a5'; ctx.fillRect(x0+2, y+2, Math.max(0,w-4), 8);
+      ctx.fillStyle = '#d7e6ff'; ctx.font = 'bold 11px ui-sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText('JWST', x0+w/2, y+6);
+    }
+  } else {
+    const railW = 22; const pad = 6; const canvasW = ctx.canvas.clientWidth || ctx.canvas.width; const railX = canvasW - railW - pad;
+    ctx.fillStyle = '#121821'; ctx.fillRect(railX, rect.y, railW, rect.h);
+    const y0 = rect.y + rect.h*((Math.max(minNm,jwMin)-minNm)/(maxNm-minNm));
+    const y1 = rect.y + rect.h*((Math.min(maxNm,jwMax)-minNm)/(maxNm-minNm));
+    const bandH = Math.max(0, y1-y0);
+    if(bandH>0){ ctx.fillStyle = '#3b63a5'; ctx.fillRect(railX+3, y0, railW-6, bandH);
+      ctx.save();
+      ctx.translate(railX+railW/2, y0+bandH/2);
+      ctx.rotate(-Math.PI/2);
+      ctx.fillStyle='#d7e6ff'; ctx.font='bold 12px ui-sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText('JWST', 0, 0);
+      ctx.restore();
+    }
+  }
+  ctx.restore();
+}
+
+/* ===== Axes, ticks, and band labels ===== */
+function drawAxisAndTicks(ctx, orientation, rect, minNm, maxNm, side){
+  ctx.save(); ctx.strokeStyle='rgba(255,255,255,0.28)'; ctx.fillStyle='rgba(185,200,221,0.92)'; ctx.lineWidth=1;
+  const font = Math.max(11, Math.round(Math.min(rect.h, rect.w)*0.045));
+  ctx.font = `${font}px ui-sans-serif`;
+  ctx.textBaseline = orientation==='vertical' ? 'middle' : 'alphabetic';
+  const ticks = makeTicks(minNm, maxNm);
+  const map = v => orientation==='vertical' ? rect.y + rect.h*((v-minNm)/(maxNm-minNm)) : rect.x + rect.w*((v-minNm)/(maxNm-minNm));
+
+  if(orientation==='vertical'){
+    const xText = side==='left' ? rect.x-4 : rect.x+rect.w+4;
+    const xTick = side==='left'? rect.x-4 : rect.x+rect.w+4;
+    for(const t of ticks){ const p = map(t); ctx.beginPath(); ctx.moveTo(xTick, p+.5); ctx.lineTo(xTick+(side==='left'?-6:6), p+.5); ctx.stroke(); ctx.textAlign = side==='left' ? 'right' : 'left'; ctx.fillText(labelText(t), xText, p); }
+  } else {
+    const yTicks = rect.y+rect.h+6; const yText = yTicks+12;
+    for(const t of ticks){ const p = map(t); ctx.beginPath(); ctx.moveTo(p+.5, yTicks); ctx.lineTo(p+.5, yTicks+6); ctx.stroke(); ctx.textAlign='center'; ctx.fillText(labelText(t), p, yText); }
+  }
+  ctx.restore();
+}
+
+function drawBandLabels(ctx, orientation, rect, minNm, maxNm, side){
+  ctx.save();
+  ctx.fillStyle='rgba(230,240,255,0.95)';
+  const font = Math.round(Math.max(12, Math.min(16, rect.h*0.022)));
+  ctx.font = `900 ${font}px ui-sans-serif`;
+  ctx.strokeStyle='rgba(0,0,0,0.55)';
+  ctx.lineWidth=2;
+  if(orientation==='vertical'){
+    const canvasW = ctx.canvas.clientWidth || ctx.canvas.width;
+    const railW = 22, pad = 6;
+    const railX = canvasW - railW - pad;
+    const x = side==='left' ? rect.x-8 : Math.max(rect.x+rect.w+18, railX - 8);
+    const align = 'right';
+    const BANDS2 = [
+      {name:'UV', minNm:80, maxNm:380},
+      {name:'Visible', minNm:380, maxNm:700},
+      {name:'NIR', minNm:700, maxNm:1400},
+      {name:'MIR', minNm:1400, maxNm:25000},
+      {name:'FIR', minNm:25000, maxNm:1000000}
+    ];
+    for(const b of BANDS2){
+      const a=Math.max(minNm,b.minNm), z=Math.min(maxNm,b.maxNm); if(z<=a) continue;
+      const mid=(a+z)/2; const y=rect.y + rect.h*((mid-minNm)/(maxNm-minNm));
+      ctx.save(); ctx.translate(x, y); ctx.rotate(-Math.PI/2); ctx.textAlign=align; ctx.textBaseline='middle'; ctx.fillText(b.name, 0, 0); ctx.restore();
+    }
+  } else {
+    const y = rect.y - 8; ctx.textBaseline='alphabetic'; ctx.textAlign='center';
+    const BANDS2 = [
+      {name:'UV', minNm:80, maxNm:380},
+      {name:'Visible', minNm:380, maxNm:700},
+      {name:'NIR', minNm:700, maxNm:1400},
+      {name:'MIR', minNm:1400, maxNm:25000},
+      {name:'FIR', minNm:25000, maxNm:1000000}
+    ];
+    for(const b of BANDS2){ const a=Math.max(minNm,b.minNm), z=Math.min(maxNm,b.maxNm); if(z<=a) continue; const mid=(a+z)/2; const x=rect.x + rect.w*((mid-minNm)/(maxNm-minNm)); ctx.fillText(b.name, x, y); }
+  }
+  ctx.restore();
+}
+
+/* ===== Spectral lines ===== */
+function drawLineMarkers(ctx, orientation, rect, minNm, maxNm, lines, color){
+  ctx.save();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = color || '#9fe0ff';
+  for(const ln of lines){
+    if(ln.nm<minNm||ln.nm>maxNm) continue;
+    const p = (ln.nm-minNm)/(maxNm-minNm);
+    if(orientation==='vertical'){
+      const y = rect.y + rect.h*p; ctx.beginPath(); ctx.moveTo(rect.x, y+.5); ctx.lineTo(rect.x+rect.w, y+.5); ctx.stroke();
+    } else {
+      const x = rect.x + rect.w*p; ctx.beginPath(); ctx.moveTo(x+.5, rect.y); ctx.lineTo(x+.5, rect.y+rect.h); ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+function labelForLine(ln, mode){
+  const nm = ln.nm;
+  if(mode === 'wavelength'){
+    if(nm>=1000){
+      const um = nm/1000; const d = um<10?2:um<100?1:0; return um.toFixed(d)+' µm';
+    }
+    return nm.toFixed(1); // no unit for nm-range
+  }
+  // mode === 'full': include name, drop 'nm' unit, keep µm in IR
+  if(nm>=1000){
+    const um = nm/1000; const d = um<10?2:um<100?1:0; return `${ln.name} — ${um.toFixed(d)} µm`;
+  }
+  return `${ln.name} — ${nm.toFixed(1)}`; // no unit for nm-range
+}
+
+function drawLineLabels(ctx, orientation, rect, minNm, maxNm, lines, color, opts={}){
+  if(orientation!=='vertical'){ return; }
+  const { mode='full', align='left', fontScale=0.06 } = opts;
+  ctx.save();
+  const base = Math.min(rect.h, rect.w);
+  const font = Math.max(11, Math.round(base*fontScale));
+  ctx.font = `${font}px ui-sans-serif`;
+  ctx.textBaseline='alphabetic';
+  ctx.fillStyle = color || '#e7fcff';
+  ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+  ctx.lineWidth = 3;
+  ctx.lineJoin = 'round';
+
+  const inRange = lines.filter(l=>l.nm>=minNm && l.nm<=maxNm).sort((a,b)=>a.nm-b.nm);
+  const minGap = Math.max(12, Math.round(font * 1.05));
+  let lastY = -1e9;
+  for(const ln of inRange){
+    const p = (ln.nm-minNm)/(maxNm-minNm);
+    let y = rect.y + rect.h*p;
+    if(y - lastY < minGap) { y = lastY + minGap; }
+    if(y > rect.y + rect.h - 2) y = rect.y + rect.h - 2;
+    lastY = y;
+
+    const text = labelForLine(ln, mode);
+    let x = align==='right' ? rect.x + rect.w - 6 : rect.x + 6;
+    ctx.textAlign = align==='right' ? 'right' : 'left';
+    ctx.strokeText(text, x, y-2);
+    ctx.fillText(text, x, y-2);
+  }
+  ctx.restore();
+}
+
+function layoutLabelYs(lines, rect, minNm, maxNm, gap){
+  const inRange = lines.filter(l=>l.nm>=minNm && l.nm<=maxNm).sort((a,b)=>a.nm-b.nm);
+  const ys=[]; let lastY=-1e9;
+  for(const ln of inRange){ let y = rect.y + rect.h*((ln.nm-minNm)/(maxNm-minNm)); if(y-lastY<gap) y = lastY+gap; if(y<=rect.y+rect.h) { ys.push(y); lastY=y; } }
+  return ys;
+}
+
+/* ================== Main ================== */
+let z = 0; // start at rest
+const restCanvas=document.getElementById('restCanvas');
+const shiftCanvas=document.getElementById('shiftCanvas');
+const zVal=document.getElementById('zVal');
+const epochEl=document.getElementById('epoch');
+const ageVal=document.getElementById('ageVal');
+
+function autofitPill(el, maxPx=16, minPx=11){
+  const style = el.style;
+  style.fontSize = maxPx + 'px';
+  let fs = maxPx;
+  while(el.scrollWidth > el.clientWidth && fs > minPx){ fs -= 0.5; style.fontSize = fs + 'px'; }
+  return fs;
+}
+
+function draw(){
+  sizeCanvas(restCanvas); sizeCanvas(shiftCanvas);
+  const ctxL=restCanvas.getContext('2d'); const ctxR=shiftCanvas.getContext('2d');
+  ctxL.clearRect(0,0,restCanvas.width,restCanvas.height); ctxR.clearRect(0,0,shiftCanvas.width,shiftCanvas.height);
+
+  const orientation = isLandscape()? 'horizontal' : 'vertical';
+  const minRest=80, maxRest=800;
+  const minShift=minRest*(1+z), maxShift=maxRest*(1+z);
+
+  const rectL=innerRect(restCanvas, {rightLabels:false});
+  const rectR=innerRect(shiftCanvas, {rightLabels: !isLandscape()});
+
+  drawBackground(ctxL, orientation==='horizontal'?'horizontal':'vertical', rectL, minRest, maxRest);
+  drawBackground(ctxR, orientation==='horizontal'?'horizontal':'vertical', rectR, minShift, maxShift);
+  // Draw JWST rail first, then band labels on top of it so labels are "above" the bar
+  drawJWST(ctxR, orientation, rectR, minShift, maxShift);
+  drawBandLabels(ctxR, orientation==='horizontal'?'horizontal':'vertical', rectR, minShift, maxShift, rectR.axisSide);
+
+  if(orientation==='horizontal'){
+    drawAxisAndTicks(ctxL, 'horizontal', rectL, minRest, maxRest, 'bottom');
+    drawAxisAndTicks(ctxR, 'horizontal', rectR, minShift, maxShift, 'bottom');
+  } else {
+    drawAxisAndTicks(ctxL, 'vertical', rectL, minRest, maxRest, 'left');
+    drawAxisAndTicks(ctxR, 'vertical', rectR, minShift, maxShift, 'right');
+  }
+
+  const shifted = LINES.map(l=>({...l, nm:l.nm*(1+z)}));
+  drawLineMarkers(ctxL, orientation==='horizontal'?'horizontal':'vertical', rectL, minRest, maxRest, LINES, '#000');
+  drawLineMarkers(ctxR, orientation==='horizontal'?'horizontal':'vertical', rectR, minShift, maxShift, shifted, '#000');
+  drawLineLabels(ctxL, orientation==='horizontal'?'horizontal':'vertical', rectL, minRest, maxRest, LINES, '#e7fcff', {mode:'full', align:'left', fontScale:0.102});
+  drawLineLabels(ctxR, orientation==='horizontal'?'horizontal':'vertical', rectR, minShift, maxShift, shifted, '#e7fcff', {mode:'wavelength', align:'right', fontScale:0.13});
+
+  zVal.textContent = z.toFixed(2);
+  const ep=chooseEpoch(z); epochEl.textContent=ep.label; ageVal.textContent = formatYears(ageAtZYears(z));
+  autofitPill(zVal); autofitPill(epochEl); autofitPill(ageVal);
+  fillInfo();
+}
+
+function fillInfo(){
+  const DcMpc=comovingDistanceMpc(z); const DcLy=DcMpc*MPC_TO_LY; const DlLy=DcLy*(1+z); const lt=lookbackTimeYears(z); const age=ageAtZYears(z);
+  const rows=[["(1+z)", (1+z).toFixed(3)],["Light-travel", formatLy(lt)],["Comoving", formatLy(DcLy)],["Luminosity", formatLy(DlLy)],["Age @ z", formatYears(age)],["Epoch", chooseEpoch(z).label]];
+  document.getElementById('infoGrid').innerHTML = rows.map(([k,v])=>`<dt>${k}</dt><dd>${v}</dd>`).join('');
+}
+
+/* ================== Interactions ================== */
+let dragging=false, startCoord=0, startLog=0;
+function setZ(nz){ z = Math.max(0, Math.min(20000, nz)); draw(); }
+function beginDrag(e){
+  dragging=true;
+  startCoord = isLandscape()? e.clientX : e.clientY;
+  startLog = Math.log10(1+z);
+  if(e.currentTarget && e.pointerId!=null && e.currentTarget.setPointerCapture){
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+}
+function moveDrag(e){
+  if(!dragging) return;
+  const cur = isLandscape()? e.clientX : e.clientY;
+  const span = isLandscape()? e.currentTarget.clientWidth : e.currentTarget.clientHeight;
+  const dex = -(cur-startCoord)/Math.max(240, span);
+  const nz = Math.pow(10, startLog + dex) - 1;
+  setZ(nz);
+  if(e && e.cancelable) e.preventDefault(); // block scroll while actively dragging
+}
+function endDrag(){ dragging=false; }
+if(window.PointerEvent){
+  shiftCanvas.addEventListener('pointerdown', beginDrag, {passive:true});
+  shiftCanvas.addEventListener('pointermove', moveDrag, {passive:false});
+  shiftCanvas.addEventListener('pointerup', endDrag);
+  shiftCanvas.addEventListener('pointercancel', endDrag);
+} else {
+  shiftCanvas.addEventListener('touchstart', (ev)=>{
+    dragging=true; const t=ev.touches[0];
+    startCoord = isLandscape()? t.clientX : t.clientY;
+    startLog = Math.log10(1+z);
+  }, {passive:true});
+  shiftCanvas.addEventListener('touchmove', (ev)=>{
+    if(!dragging) return; const t=ev.touches[0];
+    const cur = isLandscape()? t.clientX : t.clientY;
+    const span = shiftCanvas.clientHeight;
+    const dex = -(cur-startCoord)/Math.max(240, span);
+    const nz = Math.pow(10, startLog + dex) - 1;
+    setZ(nz);
+    if(ev.cancelable) ev.preventDefault();
+  }, {passive:false});
+  shiftCanvas.addEventListener('touchend', ()=>{ dragging=false; });
+  shiftCanvas.addEventListener('touchcancel', ()=>{ dragging=false; });
+}
+
+shiftCanvas.addEventListener('wheel', (e)=>{
+  e.preventDefault();
+  const span = isLandscape()? shiftCanvas.clientWidth : shiftCanvas.clientHeight;
+  const dex = (e.deltaY>0? 1:-1) * (1/Math.max(6, span/240));
+  setZ(Math.pow(10, Math.log10(1+z)+dex) - 1);
+}, {passive:false});
+
+// ======= Epoch cycling on pill taps =======
+function currentEpochIndex(){
+  const cur = chooseEpoch(z);
+  // find by label/minZ
+  const idx = E_ORDER.findIndex(e=>e.label===cur.label && e.minZ===cur.minZ);
+  return idx>=0? idx : 0;
+}
+function cycleEpoch(dir=+1){
+  const idx = currentEpochIndex();
+  let next = (idx + dir) % E_ORDER.length; if(next<0) next += E_ORDER.length;
+  const targetZ = E_ORDER[next].minZ;
+  setZ(targetZ);
+}
+// click any of the three pills to advance; Shift+click goes backward (desktop)
+function attachCycle(el){
+  el.addEventListener('click', (ev)=>{ cycleEpoch(ev.shiftKey? -1 : +1); });
+  el.addEventListener('keydown', (ev)=>{ if(ev.key==='Enter' || ev.key===' '){ ev.preventDefault(); cycleEpoch(+1); } if(ev.key==='ArrowLeft'){ cycleEpoch(-1); } if(ev.key==='ArrowRight'){ cycleEpoch(+1); } });
+}
+attachCycle(zVal); attachCycle(epochEl); attachCycle(ageVal);
+
+// Info dialog
+const openInfoBtn = document.getElementById('openInfo');
+const closeInfoBtn = document.getElementById('closeInfo');
+openInfoBtn.addEventListener('click', ()=>{ fillInfo(); document.getElementById('info').showModal(); });
+closeInfoBtn.addEventListener('click', ()=> document.getElementById('info').close());
+
+const infoDlg = document.getElementById('info');
+infoDlg.addEventListener('click', (e)=>{
+  const rect = infoDlg.getBoundingClientRect();
+  const inDialog = e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
+  if(!inDialog) infoDlg.close();
+});
+
+// Redraw on size changes; no viewport height thrash
+window.addEventListener('resize', ()=>{ draw(); }, {passive:true});
+
+setZ(0);
+
+/* ================== Tiny runtime tests ================== */
+(function runTests(){
+  try{
+    console.assert(document.getElementById('restCanvas') && document.getElementById('shiftCanvas'), 'canvases exist');
+    console.assert(typeof drawJWST === 'function', 'JWST drawer present');
+    console.assert(typeof drawBandLabels === 'function', 'band label drawer present');
+    console.assert(typeof drawLineLabels === 'function', 'line label drawer present');
+    console.assert(typeof DPR()==='number' && DPR()>0, 'DPR returns a positive number');
+
+    const rc = restCanvas; const rect = innerRect(rc,{rightLabels:false});
+    const y80 = rect.y + rect.h*((80-80)/(800-80));
+    const y800 = rect.y + rect.h*((800-80)/(800-80));
+    console.assert(Math.abs(y80-rect.y) < 1e-6 || Math.abs(y800-(rect.y+rect.h)) < 1e-6, 'range maps correctly');
+
+    const a1100 = ageAtZYears(1100);
+    console.assert(a1100>1e5 && a1100<8e5, 'age@1100 within 0.1–0.8 Myr');
+    const a1e4 = ageAtZYears(10000);
+    console.assert(a1e4>2e3 && a1e4<5e4, 'age@10000 within 2–50 kyr');
+    console.assert(ageAtZYears(10) < ageAtZYears(1), 'age decreases with z');
+
+    const tIR = makeTicks(6000, 20000); console.assert(tIR.some(v=>v>=10000), 'IR ticks present');
+    console.assert(labelText(1500).includes('µm'), 'µm unit for IR');
+
+    console.assert(chooseEpoch(10000).label !== '🐉 Monsters', 'finite age ≠ Monsters');
+
+    autofitPill(epochEl); autofitPill(ageVal);
+    console.assert(epochEl.scrollWidth <= epochEl.clientWidth, 'epoch fits box');
+    console.assert(ageVal.scrollWidth <= ageVal.clientWidth, 'age fits box');
+
+    const a0 = ageAtZYears(0);
+    console.assert(a0>13e9 && a0<14.6e9, 'age@0 within realistic bounds');
+    const ys = layoutLabelYs(LINES, {y:0,h:600}, 80, 800, 12);
+    console.assert(ys.length >= 15, 'label density increased');
+    const t1 = labelForLine({name:'Test', nm:500}, 'wavelength');
+    console.assert(!/Test/.test(t1) && !/nm/.test(t1), 'wavelength-only nm labels drop unit');
+    const t2 = labelForLine({name:'Test', nm:1500}, 'wavelength');
+    console.assert(/µm/.test(t2), 'wavelength-only IR labels keep µm');
+    const t3 = labelForLine({name:'Hα', nm:656.28}, 'full');
+    console.assert(/Hα/.test(t3) && !/nm/.test(t3), 'rest labels drop nm unit');
+
+    // Pills act as buttons
+    for(const el of [zVal, epochEl, ageVal]){
+      console.assert(el.getAttribute('role')==='button', 'pill is button-like');
+    }
+
+    const ta = getComputedStyle(shiftCanvas).touchAction || '';
+    console.assert(/none/i.test(ta), 'touch-action none set on canvas');
+    console.log('Inline tests passed');
+  }catch(e){ console.error('Inline tests failed', e); }
+})();
+</script>
+</body>
+</html>
